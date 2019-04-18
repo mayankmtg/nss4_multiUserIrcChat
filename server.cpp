@@ -27,7 +27,27 @@
 
 using namespace std;
 
+struct group_type{
+	int admin;
+	vector<int> user_ids;
+	string group_name;
+	int group_id;
+};
+
+struct group_invite{
+	int from_uid;
+	int to_uid;
+	string group_name;
+	int status;
+};
+
 static string rootDir = "/home/mayank/simple_slash";
+
+// uid, socket
+vector< tuple < int, int, pair< string, string > > > logged_in_clients;
+
+vector<group_type> all_groups;
+vector<group_invite> all_invites;
 
 void throw_error(string ss){
 	cerr << "error:\t " << ss << endl;
@@ -249,15 +269,36 @@ string encrypt_mod(string plaintext_string, string key, string iv){
 	return encrypted_string;
 }
 
+void send_enc(int sockfd, string plaintext, string key, string iv){
+	string encrypted_text = encrypt_mod(plaintext, key, iv);
+	int sendRet = send(sockfd, encrypted_text.c_str(), encrypted_text.length(), 0);
+	if(sendRet == -1){
+		throw_error("sending script error");
+	}
+}
+
+string read_dec(int sockfd, string key, string iv ){
+	char buff[1024];
+	int read_size = read(sockfd,buff,1024);
+	if(read_size==-1){
+		throw_error("reading socket failed");
+	}
+	else if(read_size == 0){
+		return NULL;
+	}
+	string ret_str = string(buff,read_size);
+	return decrypt_mod(ret_str,key,iv);
+}
+
 
 class read_thread_handler{
 	public:
-		void operator()(int sockFd){
+		void operator()(int sockfd){
 			while(1==1){
 				cout << "waiting to read"<< endl;
 				char buff[1024];
 				cout << "waiting" << endl;
-				int read_size = read(sockFd,buff,1024);
+				int read_size = read(sockfd,buff,1024);
 				if(read_size==-1){
 					throw_error("reading socket failed");
 				}
@@ -297,6 +338,180 @@ class thread_handler{
 			read_thread.join();
 			// write_thread.join();
 			return;
+		}
+};
+
+
+class client_handler{
+	public:
+		void operator()(int sockfd, pair<string, string> shared_secret, int client_uid){
+			while(1==1){
+				string client_str = read_dec(sockfd, shared_secret.first, shared_secret.second);
+				string command;
+				string argument;
+				int pos = client_str.find("|||");
+				if(pos==string::npos){
+					command = client_str;
+					argument = "";
+				}
+				else{
+					command = client_str.substr(0,pos);
+					argument = client_str.substr(pos+3);
+				}
+
+				if(command == "/who"){
+					ostringstream ss;
+					for (int i=0;i<logged_in_clients.size();i++){
+						ss << get<0>(logged_in_clients[i]) << " " << getProcessUsername(get<0>(logged_in_clients[i])) << endl;
+					}
+					string ss_str = ss.str();
+					send_enc(sockfd,ss_str,shared_secret.first, shared_secret.second);
+				}
+				else if(command == "/write_all"){
+					for (int i=0;i < logged_in_clients.size();i++){
+						int fd = get<1>(logged_in_clients[i]);
+						pair<string, string> this_secret = get<2>(logged_in_clients[i]);
+						if(fd != sockfd){
+							send_enc(fd,argument,this_secret.first, this_secret.second);
+						}
+					}
+				}
+				else if(command == "/create_group"){
+					struct group_type new_group;
+					new_group.admin = client_uid;
+					new_group.group_id = all_groups.size();
+					new_group.group_name = "g" + to_string(all_groups.size());
+					new_group.user_ids.push_back(client_uid);
+					all_groups.push_back(new_group);
+					send_enc(sockfd,new_group.group_name,shared_secret.first, shared_secret.second);
+				}
+				else if(command == "/group_invite"){
+					pos = argument.find("|||");
+					string group_name = argument.substr(0,pos);
+					string invite_uid = argument.substr(pos+3);
+					int invite_uid_int = stoi(invite_uid);
+					struct group_type temp_group;
+					int flag=0;
+					for (int i=0;i<all_groups.size();i++){
+						if(all_groups[i].group_name == group_name){
+							flag = 1;
+							temp_group = all_groups[i];
+							break;
+						}
+					}
+					string message;
+					if(flag==0){
+						message = "Group Name entered incorrect";
+						send_enc(sockfd,message,shared_secret.first, shared_secret.second);
+						continue;
+					}
+					// TODO:: if the person who has not created the group invites for the group
+					flag=0;
+					int send_fd;
+					pair<string,string> send_key;
+					for (int i=0;i< logged_in_clients.size();i++ ){
+						if(get<0>(logged_in_clients[i]) == invite_uid_int){
+							flag=1;
+							send_fd = get<1>(logged_in_clients[i]);
+							send_key = get<2>(logged_in_clients[i]);
+							break;
+						}
+					}
+					if(flag==0){
+						message = "Invalid User id entered";
+						send_enc(sockfd,message,shared_secret.first, shared_secret.second);
+						continue;
+					}
+					struct group_invite new_invite;
+					new_invite.from_uid = client_uid;
+					new_invite.to_uid = invite_uid_int;
+					new_invite.group_name = group_name;
+					new_invite.status = 0;
+					all_invites.push_back(new_invite);
+					message = "Invite::"+ group_name + "::" + to_string(client_uid) + "::" + invite_uid;
+					send_enc(send_fd, message, send_key.first, send_key.second);
+				}
+				else if(command == "/group_invite_accept"){
+					int flag = 0;
+					struct group_type* temp_group;
+					for (int i=0;i<all_groups.size();i++){
+						if(all_groups[i].group_name == argument){
+							temp_group = &all_groups[i];
+							flag=1;
+							break;
+						}
+					}
+					string message;
+					if(flag == 0){
+						message = "Group name does not exists";
+						send_enc(sockfd,message,shared_secret.first, shared_secret.second);
+						continue;
+					}
+					for (int i=0;i<all_invites.size();i++){
+						if(all_invites[i].group_name == temp_group->group_name && all_invites[i].to_uid == client_uid && all_invites[i].status == 0){
+							all_invites[i].status = 1;
+							temp_group->user_ids.push_back(client_uid);
+						}
+					}
+					message = "Added to Group Successfully";
+					send_enc(sockfd, message, shared_secret.first, shared_secret.second);
+
+				}
+				else if(command == "/request_public_key"){
+					send_enc(sockfd,client_str,shared_secret.first, shared_secret.second);
+				}
+				else if(command == "/send_public_key"){
+					send_enc(sockfd,client_str,shared_secret.first, shared_secret.second);
+				}
+				else if(command == "/init_group_dhxchg"){
+					int flag = 0;
+					struct group_type temp_group;
+					for (int i=0;i<all_groups.size();i++){
+						if(all_groups[i].group_name == argument && all_groups[i].admin == client_uid){
+							flag=1;
+							temp_group = all_groups[i];
+							break;
+						}
+					}
+					int g = 199, p=997;
+					string message;
+					if(flag == 0){
+						message = "Invalid request";
+						send_enc(sockfd,message,shared_secret.first, shared_secret.second);
+						continue;
+					}
+					vector< pair<int,int> > private_ids; 
+
+					for (int i=0;i<temp_group.user_ids.size();i++){
+						for(int j=0;j<logged_in_clients.size();j++){
+							if(temp_group.user_ids[i]==get<0>(logged_in_clients[j])){
+								message = "givemedh";
+								send_enc(get<1>(logged_in_clients[j]), message, get<2>(logged_in_clients[j]).first, get<2>(logged_in_clients[j]).second);
+								string pk = read_dec(get<1>(logged_in_clients[j]),get<2>(logged_in_clients[j]).first, get<2>(logged_in_clients[j]).second);
+								private_ids.push_back(make_pair(get<1>(logged_in_clients[j]),stoi(pk)));
+							}
+						}
+					}
+					int mul = 1;
+					for(int i=0;i<private_ids.size();i++){
+						mul*=private_ids[i].second;
+					}
+					int result = (int)pow(g,mul) % p;
+					for (int i=0;i<temp_group.user_ids.size();i++){
+						for(int j=0;j<logged_in_clients.size();j++){
+							if(temp_group.user_ids[i]==get<0>(logged_in_clients[j])){
+								message = to_string(result);
+								send_enc(get<1>(logged_in_clients[j]), message, get<2>(logged_in_clients[j]).first, get<2>(logged_in_clients[j]).second);
+							}
+						}
+					}
+				}
+				else{
+					send_enc(sockfd,client_str,shared_secret.first, shared_secret.second);
+				}
+				// cout << "Running" << endl;
+			}
+
 		}
 };
 
@@ -351,7 +566,7 @@ class kdc_handler{
 				string password_str = to_string(rand() % 1000);
 				pair<string,string> shared_secret = getKeyIVfromPassword(password_str.c_str());
 				
-				string ticket_key_iv_string = shared_secret.first + "|||" + shared_secret.second;
+				string ticket_key_iv_string = shared_secret.first + "|||" + shared_secret.second + "|||" + uid_client;
 				string ticket = encrypt_mod(ticket_key_iv_string,currKeyIv.first, currKeyIv.second);
 
 				string send_string = nonce + "|||" + to_string(port_svr) + "|||" + shared_secret.first + "|||" + shared_secret.second + "|||" + ticket;
@@ -392,6 +607,7 @@ class svr_handler{
 			
 			int svrAddLen = sizeof(svrAdd);
 			pair<string, string> shared_key;
+			vector<thread> all_clients_threads;
 			while(1==1){
 				int acceptFd = accept(sockfd,(struct sockaddr *)&svrAdd,(socklen_t*) &svrAddLen);
 				if(acceptFd==-1){
@@ -418,7 +634,15 @@ class svr_handler{
 					
 					string ticket_dec = decrypt_mod(ticket, currKeyIv.first, currKeyIv.second);
 					pos = ticket_dec.find("|||");
-					shared_key = make_pair(ticket_dec.substr(0,pos), ticket_dec.substr(pos+3));
+					string ticket_key = ticket_dec.substr(0,pos);
+					ticket_dec = ticket_dec.substr(pos+3);
+					
+					pos = ticket_dec.find("|||");
+					string ticket_iv = ticket_dec.substr(0,pos);
+
+					string uid_client = ticket_dec.substr(pos+3);
+					cout << uid_client << endl;
+					shared_key = make_pair(ticket_key,ticket_iv);
 					
 					string nonce_dec = decrypt_mod(rec_string, shared_key.first, shared_key.second);
 					
@@ -453,7 +677,15 @@ class svr_handler{
 					if(sendRet == -1){
 						throw_error("writing socket failed");
 					}
+					if(status == "Success"){
+						all_clients_threads.push_back(thread(client_handler(), acceptFd, shared_key, stoi(uid_client)));
+						logged_in_clients.push_back(make_tuple(stoi(uid_client), acceptFd, shared_key));
+					}
 				}
+
+			}
+			for (int i=0;i<all_clients_threads.size();i++){
+				all_clients_threads[i].join();
 			}
 
 		}

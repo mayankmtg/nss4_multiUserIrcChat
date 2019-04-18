@@ -28,6 +28,9 @@
 
 using namespace std;
 
+// groupname, key
+vector< pair<string,pair<string,string> > > group_keys;
+
 void throw_error(string ss){
 	cerr << "error:\t " << ss << endl;
 	exit(0);
@@ -151,40 +154,6 @@ pair<string, string> getKeyIVfromPassword(const char* password){
 }
 
 
-class read_thread_handler{
-	public:
-		void operator()(int sockfd){
-			while(1==1){
-				// cout << "waiting to read"<< endl;
-				char buff[1024];
-				int read_size = read(sockfd,buff,1024);
-				if(read_size==-1){
-					throw_error("reading socket failed");
-				}
-				else if(read_size==0){
-					return;
-				}
-				string ret_str = string(buff,read_size);
-				cout << ret_str<< endl;
-			}
-		}
-};
-
-class write_thread_handler{
-	public:
-		void operator()(int sockfd){
-			while(1==1){
-				// cout << "waiting to write"<< endl;
-				string input;
-				cin >> input;
-				int sendRet = send(sockfd,input.c_str(), input.length(), 0);
-				if(sendRet==-1){
-					throw_error("writing socket failed");
-				}
-			}
-			return;
-		}
-};
 
 int encrypt(unsigned char *plaintext, int plaintext_len, unsigned char *key, unsigned char *iv, unsigned char *ciphertext){
 	EVP_CIPHER_CTX *ctx;
@@ -250,6 +219,28 @@ string encrypt_mod(string plaintext_string, string key, string iv){
 	return encrypted_string;
 }
 
+void send_enc(int sockfd, string plaintext, string key, string iv){
+	string encrypted_text = encrypt_mod(plaintext, key, iv);
+	int sendRet = send(sockfd, encrypted_text.c_str(), encrypted_text.length(), 0);
+	if(sendRet == -1){
+		throw_error("sending script error");
+	}
+}
+
+string read_dec(int sockfd, string key, string iv ){
+	char buff[1024];
+	int read_size = read(sockfd,buff,1024);
+	cout << read_size << endl;
+	if(read_size==-1){
+		throw_error("reading socket failed");
+	}
+	else if(read_size == 0){
+		return NULL;
+	}
+	string ret_str = string(buff,read_size);
+	return decrypt_mod(ret_str,key,iv);
+}
+
 string authentication_init(int port, uid_t uid, string curr_key, string curr_iv){
 	int nonce_1 = rand() % 10;
 	cout << "Nonce 1: " << nonce_1 << endl;
@@ -291,7 +282,40 @@ string authentication_init(int port, uid_t uid, string curr_key, string curr_iv)
 	return kdc_resp;
 }
 
-bool authentication_chrp(int port, pair<string,string> shared_chat_client_secret, string ticket){
+
+class read_thread_handler{
+	public:
+		void operator()(int sockfd, pair<string, string> key_iv){
+			while(1==1){
+				// cout << "waiting to read"<< endl;
+				string ret_str = read_dec(sockfd,key_iv.first, key_iv.second);
+				if(ret_str.substr(0,8) == "givemedh"){
+					int pos = ret_str.find(":::");
+					string group_name = ret_str.substr(pos+3);
+					int a = rand() % 10;
+					send_enc(sockfd, to_string(a), key_iv.first, key_iv.second);
+					string dh_passphrase = read_dec(sockfd, key_iv.first, key_iv.second);
+					group_keys.push_back(make_pair(group_name, getKeyIVfromPassword(dh_passphrase.c_str())));
+				}
+				cout << ret_str<< endl;
+			}
+		}
+};
+
+class write_thread_handler{
+	public:
+		void operator()(int sockfd, pair<string, string> key_iv){
+			while(1==1){
+				// cout << "waiting to write"<< endl;
+				string input;
+				cin >> input;
+				send_enc(sockfd, input, key_iv.first, key_iv.second);
+			}
+			return;
+		}
+};
+
+void authentication_chrp(int port, pair<string,string> shared_chat_client_secret, string ticket){
 	int svr_fd = socket(AF_INET,SOCK_STREAM,0);
 	if(svr_fd==-1){
 		throw_error("creating socket");
@@ -324,7 +348,7 @@ bool authentication_chrp(int port, pair<string,string> shared_chat_client_secret
 		throw_error("reading socket failed");
 	}
 	else if(read_size==0){
-		return false;
+		return;
 	}
 	string read_string = string(buff,read_size);
 	string read_string_dec = decrypt_mod(read_string, shared_chat_client_secret.first, shared_chat_client_secret.second);
@@ -332,6 +356,7 @@ bool authentication_chrp(int port, pair<string,string> shared_chat_client_secret
 	string nonce_2_resp = read_string_dec.substr(0,pos);
 	string nonce_3_str = read_string_dec.substr(pos+3);
 	cout << "Nonce 2 resp: " << nonce_2_resp << endl;
+	cout << "Nonce 3:" << nonce_3_str << endl;
 	if(nonce_2_resp != to_string(nonce_2-1)){
 		throw_error("Authentication Error");
 	}
@@ -350,19 +375,23 @@ bool authentication_chrp(int port, pair<string,string> shared_chat_client_secret
 		throw_error("reading socket failed");
 	}
 	else if(read_size==0){
-		return false;
+		return;
 	}
 	read_string = string(buff_status,read_size);
 	read_string_dec = decrypt_mod(read_string, shared_chat_client_secret.first, shared_chat_client_secret.second);
+	cout << read_string_dec << endl;
 	if(read_string_dec=="Success"){
-		return true;
+		thread read_thread(read_thread_handler(), svr_fd, shared_chat_client_secret);
+		thread write_thread(write_thread_handler(), svr_fd, shared_chat_client_secret);
+		read_thread.join();
+		write_thread.join();
 	}
-	return false;
+	return;
 }
 
 
 int main(int argc, const char* argv[]){
-	
+	srand(time(NULL));
 	int port_kdc = 8001;
 	// int port_svr = 8080;
 	
@@ -405,11 +434,11 @@ int main(int argc, const char* argv[]){
 	// cout << nonce << port_svr_str << shared_key << shared_iv << ticket << endl;
 	pair<string,string> shared_chat_client_secret = make_pair(shared_key, shared_iv);
 	
-	bool chrp_status = authentication_chrp(port_svr, shared_chat_client_secret, ticket);
-	if(!chrp_status){
-		throw_error("Authentication Issue");
-	}
-	cout << "Authentication Successful"<< endl;
+	authentication_chrp(port_svr, shared_chat_client_secret, ticket);
+	// if(!chrp_status){
+	// 	throw_error("Authentication Issue");
+	// }
+	cout << "Authentication Failed" << endl;
 	
 	
 	// thread read_thread(read_thread_handler(), sockfd);
