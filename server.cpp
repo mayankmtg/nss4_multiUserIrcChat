@@ -32,6 +32,7 @@ struct group_type{
 	vector<int> user_ids;
 	string group_name;
 	int group_id;
+	int shared_dh;
 };
 
 struct group_invite{
@@ -48,6 +49,7 @@ vector< tuple < int, int, pair< string, string > > > logged_in_clients;
 
 vector<group_type> all_groups;
 vector<group_invite> all_invites;
+int g = 3, p=997;
 
 void throw_error(string ss){
 	cerr << "error:\t " << ss << endl;
@@ -271,6 +273,7 @@ string encrypt_mod(string plaintext_string, string key, string iv){
 
 void send_enc(int sockfd, string plaintext, string key, string iv){
 	string encrypted_text = encrypt_mod(plaintext, key, iv);
+	cout << plaintext << endl;
 	int sendRet = send(sockfd, encrypted_text.c_str(), encrypted_text.length(), 0);
 	if(sendRet == -1){
 		throw_error("sending script error");
@@ -347,6 +350,7 @@ class client_handler{
 		void operator()(int sockfd, pair<string, string> shared_secret, int client_uid){
 			while(1==1){
 				string client_str = read_dec(sockfd, shared_secret.first, shared_secret.second);
+				cout << client_uid <<": " << client_str << endl;
 				string command;
 				string argument;
 				int pos = client_str.find("|||");
@@ -464,44 +468,202 @@ class client_handler{
 					send_enc(sockfd,client_str,shared_secret.first, shared_secret.second);
 				}
 				else if(command == "/init_group_dhxchg"){
-					int flag = 0;
+					int pos = argument.find("|||");
+					string group_name = argument.substr(0,pos);
+					string g_exp = argument.substr(pos+3);
 					struct group_type temp_group;
-					for (int i=0;i<all_groups.size();i++){
-						if(all_groups[i].group_name == argument && all_groups[i].admin == client_uid){
-							flag=1;
+					int flag = 0;
+					for(int i=0;i<all_groups.size();i++){
+						if(all_groups[i].group_name==group_name && all_groups[i].admin == client_uid){
+							flag = 1;
 							temp_group = all_groups[i];
 							break;
 						}
 					}
-					int g = 199, p=997;
 					string message;
 					if(flag == 0){
 						message = "Invalid request";
 						send_enc(sockfd,message,shared_secret.first, shared_secret.second);
 						continue;
 					}
-					vector< pair<int,int> > private_ids; 
-
-					for (int i=0;i<temp_group.user_ids.size();i++){
-						for(int j=0;j<logged_in_clients.size();j++){
-							if(temp_group.user_ids[i]==get<0>(logged_in_clients[j])){
-								message = "givemedh";
-								send_enc(get<1>(logged_in_clients[j]), message, get<2>(logged_in_clients[j]).first, get<2>(logged_in_clients[j]).second);
-								string pk = read_dec(get<1>(logged_in_clients[j]),get<2>(logged_in_clients[j]).first, get<2>(logged_in_clients[j]).second);
-								private_ids.push_back(make_pair(get<1>(logged_in_clients[j]),stoi(pk)));
-							}
+					vector<int> group_users = temp_group.user_ids;
+					int next_uid;
+					flag = 0;
+					for(int i=0;i<group_users.size();i++){
+						if(group_users[i]==client_uid && i!=group_users.size()-1){
+							next_uid = group_users[i+1];
+							cout << "Next :" << next_uid << endl;
+							flag = 1;
+							break;
+						}
+						else if(group_users[i]==client_uid){
+							next_uid = -1;
+							flag = 1;
+							break;
 						}
 					}
-					int mul = 1;
-					for(int i=0;i<private_ids.size();i++){
-						mul*=private_ids[i].second;
+					if(next_uid == -1){
+						cout <<"Broadcast" << endl;
+						// Broadcast the key
+						for (int i=0;i<group_users.size();i++){
+							for(int j=0;j<logged_in_clients.size();j++){
+								if(group_users[i]==get<0>(logged_in_clients[j])){
+									message = "dhxchgend|||"+ group_name + "|||" + g_exp;
+									send_enc(get<1>(logged_in_clients[j]), message, get<2>(logged_in_clients[j]).first, get<2>(logged_in_clients[j]).second);
+								}
+							}
+						}
+						continue;
 					}
-					int result = (int)pow(g,mul) % p;
-					for (int i=0;i<temp_group.user_ids.size();i++){
+
+					int next_user_ind;
+					for(int i=0;i<logged_in_clients.size();i++){
+						if(get<0>(logged_in_clients[i])==next_uid){
+							next_user_ind = i;
+							break;
+						}
+					}
+					message = "dhxchg|||"+ group_name + "|||" + g_exp;
+					send_enc(get<1>(logged_in_clients[next_user_ind]), message, get<2>(logged_in_clients[next_user_ind]).first,get<2>(logged_in_clients[next_user_ind]).second );
+
+
+					// int flag = 0;
+					// struct group_type* temp_group;
+					// for (int i=0;i<all_groups.size();i++){
+					// 	if(all_groups[i].group_name == argument && all_groups[i].admin == client_uid){
+					// 		flag=1;
+					// 		temp_group = &all_groups[i];
+					// 		break;
+					// 	}
+					// }
+					// int g = 199, p=997;
+					// string message;
+					// if(flag == 0){
+					// 	message = "Invalid request";
+					// 	send_enc(sockfd,message,shared_secret.first, shared_secret.second);
+					// 	continue;
+					// }
+					// vector< pair<int,int> > private_ids; 
+					// for (int i=0;i<temp_group->user_ids.size();i++){
+					// 	for(int j=0;j<logged_in_clients.size();j++){
+					// 		if(temp_group->user_ids[i]==get<0>(logged_in_clients[j])){
+					// 			cout << temp_group->user_ids[i]<< endl;
+					// 			message = "givemedh|||" + argument;
+					// 			send_enc(get<1>(logged_in_clients[j]), message, get<2>(logged_in_clients[j]).first, get<2>(logged_in_clients[j]).second);
+					// 			string pk = read_dec(get<1>(logged_in_clients[j]),get<2>(logged_in_clients[j]).first, get<2>(logged_in_clients[j]).second);
+					// 			cout << get<0>(logged_in_clients[j]) << " " << pk << endl;
+					// 			private_ids.push_back(make_pair(get<1>(logged_in_clients[j]),stoi(pk)));
+					// 		}
+					// 	}
+					// }
+					// cout <<"Getting keys"<< endl;
+					// int mul = 1;
+					// for(int i=0;i<private_ids.size();i++){
+					// 	mul*=private_ids[i].second;
+					// }
+					// int result = (int)pow(g,mul) % p;
+					// temp_group->shared_dh = result;
+					// for (int i=0;i<temp_group->user_ids.size();i++){
+					// 	for(int j=0;j<logged_in_clients.size();j++){
+					// 		if(temp_group->user_ids[i]==get<0>(logged_in_clients[j])){
+					// 			message = to_string(result);
+					// 			send_enc(get<1>(logged_in_clients[j]), message, get<2>(logged_in_clients[j]).first, get<2>(logged_in_clients[j]).second);
+					// 		}
+					// 	}
+					// }
+				}
+				else if(command == "dhxchg"){
+					int pos = argument.find("|||");
+					string group_name = argument.substr(0,pos);
+					string g_exp = argument.substr(pos+3);
+					struct group_type temp_group;
+					int flag = 0;
+					for(int i=0;i<all_groups.size();i++){
+						if(all_groups[i].group_name==group_name){
+							flag = 1;
+							temp_group = all_groups[i];
+							break;
+						}
+					}
+					string message;
+					if(flag == 0){
+						message = "Invalid request";
+						send_enc(sockfd,message,shared_secret.first, shared_secret.second);
+						continue;
+					}
+					vector<int> group_users = temp_group.user_ids;
+					int next_uid;
+					flag = 0;
+					for(int i=0;i<group_users.size();i++){
+						if(group_users[i]==client_uid && i!=group_users.size()-1){
+							next_uid = group_users[i+1];
+							cout << "Next uid:" << next_uid << endl;
+							flag = 1;
+							break;
+						}
+						else if(group_users[i]==client_uid){
+							next_uid = -1;
+							flag = 1;
+							break;
+						}
+					}
+					if(next_uid == -1){
+						// Broadcast the key
+						cout << "Broadcast next" << endl;
+						for (int i=0;i<group_users.size();i++){
+							for(int j=0;j<logged_in_clients.size();j++){
+								if(group_users[i]==get<0>(logged_in_clients[j])){
+									message = "dhxchgend|||"+ group_name + "|||" + g_exp;
+									send_enc(get<1>(logged_in_clients[j]), message, get<2>(logged_in_clients[j]).first, get<2>(logged_in_clients[j]).second);
+								}
+							}
+						}
+						continue;
+					}
+
+					int next_user_ind;
+					for(int i=0;i<logged_in_clients.size();i++){
+						if(get<0>(logged_in_clients[i])==next_uid){
+							next_user_ind = i;
+							break;
+						}
+					}
+					message = "dhxchg|||"+ group_name + "|||" + g_exp;
+					send_enc(get<1>(logged_in_clients[next_user_ind]), message, get<2>(logged_in_clients[next_user_ind]).first,get<2>(logged_in_clients[next_user_ind]).second );
+
+
+				}
+				else if(command == "/write_group"){
+					int pos = argument.find("|||");
+					string group_name = argument.substr(0,pos);
+					string message = argument.substr(pos+3);
+					cout << group_name << message<< endl;
+					int flag = 0;
+					struct group_type temp_group;
+					for (int i=0;i<all_groups.size();i++){
+						if(all_groups[i].group_name == group_name){
+							for(int j=0;j<all_groups[i].user_ids.size();j++){
+								if(all_groups[i].user_ids[j] == client_uid){
+									flag = 1;
+									temp_group = all_groups[i];
+									break;
+								}
+							}
+						}
+						if(flag == 1){
+							break;
+						}
+					}
+					if(flag == 0){
+						message = "Cannot write message to this group";
+						send_enc(sockfd,message,shared_secret.first, shared_secret.second);
+						continue;
+					}
+					for(int i=0;i<temp_group.user_ids.size();i++){
 						for(int j=0;j<logged_in_clients.size();j++){
-							if(temp_group.user_ids[i]==get<0>(logged_in_clients[j])){
-								message = to_string(result);
-								send_enc(get<1>(logged_in_clients[j]), message, get<2>(logged_in_clients[j]).first, get<2>(logged_in_clients[j]).second);
+							if(get<0>(logged_in_clients[j]) == temp_group.user_ids[i]){
+								string message_enc = ":::"+group_name+"|||"+ message;
+								send_enc(get<1>(logged_in_clients[j]),message_enc,get<2>(logged_in_clients[j]).first, get<2>(logged_in_clients[j]).second);
 							}
 						}
 					}
@@ -698,7 +860,7 @@ int main(int argc, const char* argv[]){
 	// port for kdc = 8000
 	int port_kdc = 8001;
 	// port for server = 8080
-	int port_svr = 8080;
+	int port_svr = 8081;
 
 	// Process Variables
 	uid_t currUid = getProcessRuid();

@@ -30,7 +30,7 @@ using namespace std;
 
 // groupname, key
 vector< pair<string,pair<string,string> > > group_keys;
-
+int g = 3, p=997;
 void throw_error(string ss){
 	cerr << "error:\t " << ss << endl;
 	exit(0);
@@ -230,7 +230,6 @@ void send_enc(int sockfd, string plaintext, string key, string iv){
 string read_dec(int sockfd, string key, string iv ){
 	char buff[1024];
 	int read_size = read(sockfd,buff,1024);
-	cout << read_size << endl;
 	if(read_size==-1){
 		throw_error("reading socket failed");
 	}
@@ -289,14 +288,76 @@ class read_thread_handler{
 			while(1==1){
 				// cout << "waiting to read"<< endl;
 				string ret_str = read_dec(sockfd,key_iv.first, key_iv.second);
-				if(ret_str.substr(0,8) == "givemedh"){
-					int pos = ret_str.find(":::");
-					string group_name = ret_str.substr(pos+3);
-					int a = rand() % 10;
-					send_enc(sockfd, to_string(a), key_iv.first, key_iv.second);
-					string dh_passphrase = read_dec(sockfd, key_iv.first, key_iv.second);
-					group_keys.push_back(make_pair(group_name, getKeyIVfromPassword(dh_passphrase.c_str())));
+				string command;
+				string argument;
+				int pos = ret_str.find("|||");
+				if(pos==string::npos){
+					command = ret_str;
+					argument = "";
 				}
+				else{
+					command = ret_str.substr(0,pos);
+					argument = ret_str.substr(pos+3);
+				}
+
+				if(command == "dhxchg"){
+					pos = argument.find("|||");
+					string group_name = argument.substr(0,pos);
+					string g_exp = argument.substr(pos+3);
+					cout << g_exp<< endl;
+					long long int g_exp_int = stoll(g_exp);
+					int c = rand() % 4;
+					long long int new_res = (long long int)pow(g_exp_int, c) % p;
+					string message = "dhxchg|||" + group_name + "|||" + to_string(new_res);
+					send_enc(sockfd, message, key_iv.first, key_iv.second);
+					continue;
+				}
+				else if(command == "dhxchgend"){
+					pos = argument.find("|||");
+					cout << argument<< endl;
+					string group_name = argument.substr(0,pos);
+					string g_exp = argument.substr(pos+3);
+					cout << g_exp<< endl;
+					// long long int g_exp_int = stoll(g_exp);
+					group_keys.push_back(make_pair(group_name, getKeyIVfromPassword(g_exp.c_str())));
+					
+				}
+				else if(ret_str.substr(0,3) == ":::"){
+					cout << "something" << endl;
+					ret_str = ret_str.substr(3);
+					int pos = ret_str.find("|||");
+					string group_name = ret_str.substr(0,pos);
+					cout << group_name << endl;
+					ret_str = ret_str.substr(pos+3);
+					int flag = 0;
+					pair<string,string> group_secret;
+					for(int i=0;i<group_keys.size();i++){
+						if(group_keys[i].first == group_name){
+							group_secret = group_keys[i].second;
+							flag = 1;
+							break;
+						}
+					}
+					if(flag == 0){
+						cout << "Incorrect group name for the message" << endl;
+						continue;
+					}
+					string message = decrypt_mod(ret_str, group_secret.first, group_secret.second);
+					cout << ":" << group_name << ":" << message<< endl;
+					continue;
+				}
+				// if(ret_str.substr(0,8) == "givemedh"){
+				// 	cout <<ret_str<< endl;
+				// 	int pos = ret_str.find(":::");
+				// 	string group_name = ret_str.substr(pos+3);
+				// 	int a = rand() % 10;
+				// 	cout << a << endl;
+				// 	send_enc(sockfd, to_string(a), key_iv.first, key_iv.second);
+				// 	cout << "sent " << a << endl;
+				// 	string dh_passphrase = read_dec(sockfd, key_iv.first, key_iv.second);
+				// 	group_keys.push_back(make_pair(group_name, getKeyIVfromPassword(dh_passphrase.c_str())));
+				// 	continue;
+				// }
 				cout << ret_str<< endl;
 			}
 		}
@@ -309,7 +370,26 @@ class write_thread_handler{
 				// cout << "waiting to write"<< endl;
 				string input;
 				cin >> input;
+				string str_cmp1 = "/init_group_dhxchg";
+				string str_cmp2 = "/write_group";
+				if(input.substr(0,str_cmp1.length())==str_cmp1){
+					string group_name = input.substr(str_cmp1.length()+3);
+					int num = rand() % 4 + 1;
+					long long int res =(long long int) pow(g,num) % p;
+					input = input+"|||"+ to_string(res);
+				}
+				else if(input.substr(0,str_cmp2.length())==str_cmp2){
+					string arg = input.substr(str_cmp2.length()+3);
+					int pos = arg.find("|||");
+					string group_name = arg.substr(0,pos);
+					string message = arg.substr(pos+3);
+					for(int i=0;i<group_keys.size();i++){
+						message = encrypt_mod(message, group_keys[i].second.first, group_keys[i].second.second);
+					}
+					input = str_cmp2 + "|||" + group_name + "|||" + message;
+				}
 				send_enc(sockfd, input, key_iv.first, key_iv.second);
+
 			}
 			return;
 		}
